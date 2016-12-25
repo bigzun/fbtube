@@ -1,0 +1,480 @@
+package com.viettel.keeng.media.player.service;
+
+import android.annotation.TargetApi;
+import android.content.Context;
+import android.content.Intent;
+import android.media.MediaPlayer;
+import android.os.Binder;
+import android.os.Build;
+import android.os.IBinder;
+import android.provider.Settings;
+import android.text.TextUtils;
+import android.util.DisplayMetrics;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.View.OnLongClickListener;
+import android.view.WindowManager;
+import android.widget.ImageView;
+import android.widget.RelativeLayout;
+
+import com.android.volley.Response.ErrorListener;
+import com.android.volley.Response.Listener;
+import com.android.volley.VolleyError;
+import com.viettel.keeng.App;
+import com.viettel.keeng.Constants;
+import com.viettel.keeng.R;
+import com.viettel.keeng.activity.PlayerActivity;
+import com.viettel.keeng.activity.SplashActivity;
+import com.viettel.keeng.activity.abs.BaseActivity;
+import com.viettel.keeng.anim.PeakAnimation;
+import com.viettel.keeng.control.CircleImageView;
+import com.viettel.keeng.database.source.ContactDataSource;
+import com.viettel.keeng.helper.TextHelper;
+import com.viettel.keeng.model.AllModel;
+import com.viettel.keeng.model.LoginObject;
+import com.viettel.keeng.model.PlayingList;
+import com.viettel.keeng.model.UserInfo;
+import com.viettel.keeng.util.Log;
+import com.viettel.keeng.util.Utilities;
+import com.viettel.keeng.webservice.restful.WSRestSocialUser;
+import com.viettel.keeng.webservice.restpaser.RestAllUserInfo;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+
+import jp.co.recruit_lifestyle.android.floatingview.FloatingViewListener;
+import jp.co.recruit_lifestyle.android.floatingview.FloatingViewManager;
+import jp.co.recruit_lifestyle.android.floatingview.FloatingViewManager.OnDoubleClickListen;
+
+public class PlayMusicService extends PlayMusicServiceBase implements OnLongClickListener, OnMediaPlayerServiceChangeListener, FloatingViewListener, OnDoubleClickListen {
+
+    private final IBinder mBinder = new LocalBinder();
+    private boolean isBind = false;
+    private ArrayList<UserInfo> userFollow = new ArrayList<>();
+
+    protected Map<String, UserInfo> mapId = new HashMap<>();
+
+    public ArrayList<UserInfo> getDataTag() {
+        return userFollow;
+    }
+
+    public class LocalBinder extends Binder {
+
+        public PlayMusicService getService() {
+            return PlayMusicService.this;
+        }
+    }
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        loadFriendFollowing();
+        isBind = false;
+        this.addOnChangeSongListener(this);
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        isBind = true;
+        return mBinder;
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        registryMediaButtonController();
+        if (intent == null) {
+            return super.onStartCommand(intent, flags, startId);
+        }
+        int isNotPlayFromWidget = intent.getIntExtra(Constants.RECEIVER_MANAGER.ACTION_START_WIDGET, 1000);
+        int widget = intent.getIntExtra(Constants.RECEIVER_MANAGER.ACTION_START_WIDGET, Constants.RECEIVER_MANAGER.VALUE_WIDGET);
+        if (widget == Constants.RECEIVER_MANAGER.VALUE_WIDGET) {
+            processWidget(intent);
+            updateWidget();
+        } else if (widget == Constants.RECEIVER_MANAGER.VALUE_UPDATE_WIDGET) {
+            getAlbumFromCache();
+            updateWidget();
+        } else if (widget == Constants.RECEIVER_MANAGER.VALUE_WIDGET_OPEN) {
+            if (playinglist == null || getSongs() == null) {
+                processWidget(intent);
+                updateWidget();
+                Intent i = new Intent(this, SplashActivity.class);
+                i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            } else {
+                Intent i = new Intent(this, PlayerActivity.class);
+                i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            }
+        }
+        try {
+            if (isBind) {
+                if (isNotPlayFromWidget == 1000)
+                    showMiniControlPriv();
+            }
+        } catch (Exception e) {
+            // Phuong thuc thay the minicontrol
+        }
+        return super.onStartCommand(intent, flags, startId);
+    }
+
+    // =====================DATA TAG============== =========//
+
+    public void loadFriendFollowing() {
+        if (!LoginObject.isLogin(this))
+            return;
+
+        WSRestSocialUser rest = new WSRestSocialUser(this);
+        int num = -1;
+        if (userFollow.size() > 0) {// update them data
+            num = 20;
+        }
+        rest.getFollowings(1, num, new Listener<RestAllUserInfo>() {
+            @Override
+            public void onResponse(RestAllUserInfo response) {
+                if (response.getData(getBaseContext()) != null) {
+                    ContactDataSource.getInstance().insertListItem(response.getData());
+                    updateContact(response.getData());
+                } else if (userFollow.size() == 0) {
+                    paserContact();
+                }
+            }
+        }, new ErrorListener() {
+            @Override
+            public void onErrorResponse(VolleyError error) {
+                Log.e(TAG, error);
+                if (userFollow.size() == 0) {
+                    paserContact();
+                }
+            }
+        });
+    }
+
+    private void updateContact(ArrayList<UserInfo> user) {
+        for (int i = 0; i < user.size(); i++) {
+            UserInfo item = user.get(i);
+            if (mapId.get(item.msisdn) == null) {
+                UserInfo map = singerMap.getUserInfoMaps().get(Utilities.fixPhoneNumb(item.msisdn));
+                if (map != null) {
+                    item.name = map.getNameUser();
+                    map.setAvatar(item.getAvatar());
+                }
+                if (item.nameIsPhone() || item.getNameUser() == null) {
+                    continue;
+                }
+                mapId.put(item.msisdn, item);
+                userFollow.add(item);
+            } else {
+                continue;
+            }
+        }
+        try {
+            Collections.sort(userFollow, sortABC);
+        } catch (Exception e) {
+            Log.e(TAG, e);
+        }
+
+    }
+
+    protected void paserContact() {
+        int i = 0;
+        ArrayList<UserInfo> response = ContactDataSource.getInstance().getListItem();
+
+        cleaderDataContact();
+        userFollow.addAll(response);
+        while (i < userFollow.size()) {
+            UserInfo item = userFollow.get(i);
+            UserInfo map = singerMap.getUserInfoMaps().get(Utilities.fixPhoneNumb(item.msisdn));
+            if (map != null) {
+                item.name = map.getNameUser();
+                map.setAvatar(item.getAvatar());
+            }
+            if (item.nameIsPhone() || item.getNameUser() == null) {
+                userFollow.remove(i);
+                continue;
+            }
+            mapId.put(item.msisdn, item);
+            if (TextUtils.isEmpty(item.getNameUser())) {
+                item.name = item.hidenPhoneNumber();
+            }
+            i++;
+        }
+        try {
+            Collections.sort(userFollow, sortABC);
+        } catch (Exception e) {
+            Log.e(TAG, e);
+        }
+
+    }
+
+    private static Comparator<UserInfo> sortABC = new Comparator<UserInfo>() {
+        @Override
+        public int compare(UserInfo lhs, UserInfo rhs) {
+            if (lhs.name == null || rhs.name == null)
+                return 0;
+            String s1 = lhs.name.trim().toUpperCase(Locale.US);
+            String s2 = rhs.name.trim().toUpperCase(Locale.US);
+            if ("".equals(s1) || "".equals(s2) || s1.length() < 2 || s2.length() < 2) {
+                return s1.compareTo(s2);
+            }
+
+            String nam1 = s1.substring(0, 1);
+            String nam2 = s2.substring(0, 1);
+
+            nam1 = TextHelper.convert(nam1);
+            nam2 = TextHelper.convert(nam2);
+            if (!nam1.matches("[A-Z]")) {
+                nam1 = "#";
+            }
+            if (!nam2.matches("[A-Z]")) {
+                nam2 = "#";
+            }
+            return nam1.compareTo(nam2);
+        }
+    };
+
+    public void cleaderDataContact() {
+        userFollow.clear();
+        mapId.clear();
+    }
+
+    private void changeImageControlMedia(AllModel currentModel) {
+        if (imvControlMedia != null) {
+            //currentModel.stateDownloading == -2 ||
+            if (TextUtils.isEmpty(currentModel.getImage())) {
+                App.getInstance().getImageBusiness().setImageResource(R.drawable.default_player, imvControlMedia);
+            } else {
+                App.getInstance().getImageBusiness().setControlPlayer(currentModel.getImage(), imvControlMedia);
+            }
+        }
+    }
+
+    private void showPlayerFull() {
+        if (playinglist == null || getSongs() == null) {
+            updateWidget();
+            Intent i = new Intent(getBaseContext(), SplashActivity.class);
+            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } else {
+            Intent i = new Intent(getBaseContext(), PlayerActivity.class);
+            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        }
+        if (checkShowMediaControl())
+            hideMiniControl();
+    }
+
+    private void stopMusicPriv() {
+        if (checkShowMediaControl())
+            hideMiniControl();
+        pauseMusic();
+        stopMusic();
+    }
+
+    /**
+     * Ẩn miniControl khỏi giao diện
+     */
+    public void hideMiniControl() {
+        Log.d(TAG, "HIDE_MINI_CONTROL");
+        isHuman = false;
+        App.isShowMinicontrol = false;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            if (mFloatingViewManager != null && mFloatingViewManager.hasFloatingView()) {
+                mFloatingViewManager.removeAllViewToWindow();
+            }
+        } else {
+            if (mFloatingViewManager != null) {
+                mFloatingViewManager.hideMiniControl();
+            }
+        }
+
+    }
+
+    /**
+     * Kiem tra MediaControl co show hay khong
+     *
+     * @return @true Dang hien thi
+     * @false Dang an
+     */
+    public boolean checkShowMediaControl() {
+        return App.isShowMinicontrol;
+    }
+
+    @Override
+    public void onDestroy() {
+        this.removeOnChangeSongListener(this);
+        destroy();
+        super.onDestroy();
+
+    }
+
+    @Override
+    public void onChangeStateRepeat(int state) {
+        // TODO Auto-generated method stub
+
+    }
+
+    @Override
+    public void onChangeStateNone() {
+        // TODO Auto-generated method stub
+
+    }
+
+    @Override
+    public void onChangeStateGetData(PlayingList currentList) {
+        // TODO Auto-generated method stub
+
+    }
+
+    @Override
+    public void onChangeStatePreparing(PlayingList currentList, AllModel song, int index) {
+        // if (controlView != null && windowManager != null) {
+        if (mFloatingViewManager != null) {
+            changeImageControlMedia(song);
+            // btnControlPause.setBackgroundResource(R.drawable.ic_btn_play_play);
+        }
+    }
+
+    @Override
+    public void onChangeStatePlaying(PlayingList currentList, AllModel song, int index) {
+        // if (controlView != null && windowManager != null) {
+        if (mFloatingViewManager != null) {
+            // btnControlPause.setBackgroundResource(R.drawable.ic_btn_play_pause);
+        }
+    }
+
+    @Override
+    public void onChangeStatePaused(PlayingList currentList, AllModel song, int index) {
+
+    }
+
+    @Override
+    public void onChangeDataOfPlaylist(PlayingList currentList, AllModel song, int index) {
+
+    }
+
+    @Override
+    public void onUpdateSeekBarProgress(int percent) {
+        // TODO Auto-generated method stub
+
+    }
+
+    @Override
+    public void onUpdateSeekBarBuffering(MediaPlayer mp, int percent) {
+        // TODO Auto-generated method stub
+
+    }
+
+    @Override
+    public void onMessageFromService(String mess) {
+        // TODO Auto-generated method stub
+
+    }
+
+    @Override
+    public void onFinishAll() {
+
+    }
+
+    @Override
+    public boolean onLongClick(View v) {
+        if (checkShowMediaControl())
+            hideMiniControl();
+        if (mBaseActivity != null) {
+            mBaseActivity.startPlayerActivityFromMiniMediaControl();
+        }
+        return true;
+    }
+
+    private BaseActivity mBaseActivity;
+
+    public void setActivity(BaseActivity activity) {
+        this.mBaseActivity = activity;
+    }
+
+    private FloatingViewManager mFloatingViewManager;
+
+    private void destroy() {
+        if (mFloatingViewManager != null) {
+            mFloatingViewManager.removeAllViewToWindow();
+            mFloatingViewManager = null;
+        }
+    }
+
+    @Override
+    public void onFinishFloatingView() {
+        stopMusicPriv();
+    }
+
+    private ImageView imvControlMedia;
+
+    private void showMiniControlPriv() {
+        App.isShowMinicontrol = true;
+        if (mFloatingViewManager != null) {
+            if (mFloatingViewManager.hasFloatingView()) {
+                mFloatingViewManager.showMiniControl();
+                Log.i(TAG, "mFloatingViewManager.showMiniControl()");
+                return;
+            }
+        }
+        Log.i(TAG, "showMinicontrol");
+        final DisplayMetrics metrics = new DisplayMetrics();
+        final WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        windowManager.getDefaultDisplay().getMetrics(metrics);
+        final LayoutInflater inflater = LayoutInflater.from(this);
+        final RelativeLayout iconView = (RelativeLayout) inflater.inflate(R.layout.layout_mini_control_view_play, null, false);
+        ImageView peakView = (ImageView) iconView.findViewById(R.id.peak_one);
+        imvControlMedia = (CircleImageView) iconView.findViewById(R.id.imvControlMedia);
+        AllModel currentModel = getSongCurrent();
+        if (currentModel != null && !TextUtils.isEmpty(currentModel.getImage())) {
+            changeImageControlMedia(currentModel);
+        }
+        PeakAnimation.getInstance(this).createAnimation(peakView);
+        PeakAnimation.getInstance(this).startPeakAnimation();
+        iconView.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showPlayerFull();
+            }
+        });
+
+        mFloatingViewManager = new FloatingViewManager(PlayMusicService.this, PlayMusicService.this);
+        mFloatingViewManager.setFixedTrashIconImage(R.drawable.ic_stop_music);
+        mFloatingViewManager.setActionTrashIconImage(R.drawable.ic_trash_action);
+        mFloatingViewManager.setLayoutHeightFloatingView(70);
+        mFloatingViewManager.setLayoutWidthFloatingView(70);
+        mFloatingViewManager.setmOnDoubleClickListen(this);
+        final FloatingViewManager.Options options = new FloatingViewManager.Options();
+        options.shape = FloatingViewManager.SHAPE_CIRCLE;
+        options.overMargin = (int) (5 * metrics.density);
+        options.initPositionRight = true;
+        options.positionInitY = Utilities.getPlayerMiniPositionY(this);
+        mFloatingViewManager.addViewToWindow(iconView, options);
+    }
+
+    @TargetApi(23)
+    public boolean showMiniControlPub() {
+        Log.i(TAG, "showMiniControlPub");
+        Context context = App.getInstance().getApplicationContext();
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            Intent intent = new Intent(context, PlayMusicService.class);
+            context.startService(intent);
+            return true;
+        }
+        if (Settings.canDrawOverlays(context)) {
+            Intent intent = new Intent(context, PlayMusicService.class);
+            context.startService(intent);
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public void onDoubleClickFloatingview() {
+        // showPlayerFull();
+    }
+
+}

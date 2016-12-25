@@ -1,0 +1,1599 @@
+package com.viettel.keeng.media.player.service;
+
+import android.app.Activity;
+import android.app.KeyguardManager;
+import android.app.KeyguardManager.KeyguardLock;
+import android.app.Notification;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.appwidget.AppWidgetManager;
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.database.Cursor;
+import android.media.AudioManager;
+import android.media.AudioManager.OnAudioFocusChangeListener;
+import android.media.MediaPlayer;
+import android.media.MediaPlayer.OnBufferingUpdateListener;
+import android.media.MediaPlayer.OnCompletionListener;
+import android.media.MediaPlayer.OnErrorListener;
+import android.media.MediaPlayer.OnInfoListener;
+import android.media.MediaPlayer.OnPreparedListener;
+import android.os.Build;
+import android.os.CountDownTimer;
+import android.os.Handler;
+import android.provider.MediaStore;
+import android.telephony.TelephonyManager;
+import android.text.TextUtils;
+import android.view.View;
+import android.widget.ImageView;
+import android.widget.RemoteViews;
+import android.widget.VideoView;
+
+import com.android.volley.VolleyError;
+import com.bumptech.glide.request.target.NotificationTarget;
+import com.google.gson.Gson;
+import com.viettel.keeng.App;
+import com.viettel.keeng.Constants;
+import com.viettel.keeng.R;
+import com.viettel.keeng.Variables;
+import com.viettel.keeng.activity.LockActivity;
+import com.viettel.keeng.activity.PlayerActivity;
+import com.viettel.keeng.activity.SettingActivity;
+import com.viettel.keeng.database.source.SongIndexableDataSource;
+import com.viettel.keeng.dbcontroller.FileDBService;
+import com.viettel.keeng.helper.DateTimeHelper;
+import com.viettel.keeng.helper.LogMediaHelper;
+import com.viettel.keeng.helper.NetworkHelper;
+import com.viettel.keeng.media.player.PlayerWidget;
+import com.viettel.keeng.media.player.PlayerWidget4x2;
+import com.viettel.keeng.media.player.PlayerWidget4x4;
+import com.viettel.keeng.model.AllModel;
+import com.viettel.keeng.model.LoginObject;
+import com.viettel.keeng.model.PlayingList;
+import com.viettel.keeng.receiver.MediaButtonControlReceiver;
+import com.viettel.keeng.tracker.Tracker;
+import com.viettel.keeng.util.Log;
+import com.viettel.keeng.util.SharedPref;
+import com.viettel.keeng.util.Utilities;
+import com.viettel.keeng.util.singletons.SingletonsUserInfoMaping;
+import com.viettel.keeng.webservice.restful.AbsRestful;
+import com.viettel.keeng.webservice.restful.ErrorRestListener;
+import com.viettel.keeng.webservice.restful.GsonRequest;
+import com.viettel.keeng.webservice.restful.ListenerRest;
+import com.viettel.keeng.webservice.restful.WSRestCommon;
+import com.viettel.keeng.webservice.restful.WSRestSocial;
+import com.viettel.keeng.webservice.restful.WSRestSocialUser;
+import com.viettel.keeng.webservice.restpaser.RestAllModel;
+import com.viettel.keeng.webservice.restpaser.RestModel;
+import com.viettel.keeng.webservice.restpaser.RestRankModel;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Random;
+
+@SuppressWarnings("deprecation")
+public abstract class PlayMusicServiceBase extends Service implements OnCompletionListener, OnPreparedListener, OnErrorListener, OnBufferingUpdateListener, OnAudioFocusChangeListener, OnInfoListener {
+
+    protected final String TAG = getClass().getSimpleName();
+
+    protected PlayingList playinglist = new PlayingList(null, -1, "", "", "", null);
+    private int currentSongIndex = 0;
+    private TelephonyManager telManager;
+    public static final int REPEAT_All = 0;
+    public static final int REPEAT_ONE = 1;
+    public static final int REPEAT_SUFF = 2;
+    public static final int PLAYING_NONE = 0;
+    public static final int PLAYING_GET_INFO = 1;
+    public static final int PLAYING_RETRIEVING = 2;
+    public static final int PLAYING_PREPARING = 3;
+    public static final int PLAYING_PREPARED = 4;
+    public static final int PLAYING_PLAYING = 5;
+    public static final int PLAYING_PAUSED = 6;
+    private static String currentMediaUrl = "";
+    private static int currentDuration = 0;
+
+    public int state_phone = TelephonyManager.CALL_STATE_IDLE;
+
+    public int statePlaying = PLAYING_NONE;
+    private int stateRepeat = REPEAT_All;
+
+    private AudioManager audioManager;
+    private MediaPlayer mMediaPlayer;
+
+    private ArrayList<OnMediaPlayerServiceChangeListener> onChangeService = new ArrayList<>();
+
+    private int errorCount = 0;
+    private SharedPref config;
+    private int typePlayActivity = 0;
+    public boolean isHuman = false;
+    private String mess_fromservice = "";
+    SingletonsUserInfoMaping singerMap;
+    private LogMediaHelper mLogHelper;
+
+    public int getStatePlaying() {
+        return statePlaying;
+    }
+
+    public boolean isOnMediaPlaying() {
+        if (statePlaying != PLAYING_NONE) {
+            return true;
+        }
+        return false;
+    }
+
+    public boolean isPlaying() {
+        if (statePlaying == PLAYING_PLAYING) {
+            return true;
+        }
+        return false;
+    }
+
+    public boolean isPaused() {
+        if (statePlaying == PLAYING_PAUSED) {
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public void onDestroy() {
+        releaseMedia();
+        try {
+            unregisterReceiver(broadcastReceiver);
+            unregisterReceiver(phonCallRecevied);
+            audioManager.unregisterMediaButtonEventReceiver(remoteReceiverComp);
+        } catch (IllegalArgumentException e) {
+            Log.e(TAG, e);
+        } catch (Exception e) {
+            Log.e(TAG, e);
+        }
+        stopForeground(true);
+        stopSelf();
+        super.onDestroy();
+
+    }
+
+    private void releaseMedia() {
+        if (mMediaPlayer != null) {
+            mMediaPlayer.stop();
+            mMediaPlayer.reset();
+            mMediaPlayer.release();
+            mMediaPlayer = null;
+        }
+    }
+
+    public void setRepeatState(int state) {
+        stateRepeat = state;
+    }
+
+    public int getStateRepeatPlay() {
+        return stateRepeat;
+    }
+
+    // ---------------------LISTENER------------------------------------------------------//
+
+    public void addOnChangeSongListener(OnMediaPlayerServiceChangeListener onChangeSong) {
+        this.onChangeService.add(onChangeSong);
+    }
+
+    public void removeOnChangeSongListener(OnMediaPlayerServiceChangeListener onChangeSong) {
+        this.onChangeService.remove(onChangeSong);
+    }
+
+    /**
+     * @param state : 0 onChangeSong, 1 onChangeStatePlay, 2 onComplePlaySong, 3
+     *              onPrepareFinish, 4 onPrepareStart,
+     */
+    private void runUpdateChangeService(int state) {
+        for (int i = 0; i < onChangeService.size(); i++) {
+            OnMediaPlayerServiceChangeListener item = onChangeService.get(i);
+            if (item != null) {
+                switch (state) {
+                    case OnMediaPlayerServiceChangeListener.UPDATE_STATE_NONE:
+                        statePlaying = state;
+                        item.onChangeStateNone();
+                        break;
+
+                    case OnMediaPlayerServiceChangeListener.UPDATE_STATE_GET_DATA:
+                        item.onChangeStateGetData(playinglist);
+
+                        break;
+                    case OnMediaPlayerServiceChangeListener.UPDATE_STATE_PREPARING:
+                        statePlaying = state;
+                        item.onChangeStatePreparing(playinglist, getSongCurrent(), currentSongIndex);
+
+                        break;
+                    case OnMediaPlayerServiceChangeListener.UPDATE_STATE_PLAYING:
+                        statePlaying = state;
+                        if (getSongCurrent() != null) {
+                            item.onChangeStatePlaying(playinglist, getSongCurrent(), currentSongIndex);
+                        }
+                        break;
+
+                    case OnMediaPlayerServiceChangeListener.UPDATE_STATE_PAUSED:
+                        statePlaying = state;
+                        if (getSongCurrent() != null) {
+                            item.onChangeStatePaused(playinglist, getSongCurrent(), currentSongIndex);
+                        }
+                        break;
+
+                    case OnMediaPlayerServiceChangeListener.UPDATE_CHANGE_DATA_OF_PLIST:
+                        item.onChangeDataOfPlaylist(playinglist, getSongCurrent(), currentSongIndex);
+                        break;
+
+                    case OnMediaPlayerServiceChangeListener.UPDATE_BUFFFER:
+                        item.onUpdateSeekBarBuffering(getMediaPlayer(), currentBuffer);
+                        break;
+
+                    case OnMediaPlayerServiceChangeListener.UPDATE_PROGRESS:
+                        item.onUpdateSeekBarProgress(currentProgress);
+                        break;
+
+                    case OnMediaPlayerServiceChangeListener.UPDATE_MESSAGE:
+                        item.onMessageFromService(mess_fromservice);
+                        break;
+
+                    case OnMediaPlayerServiceChangeListener.FINISH_ALL:
+                        item.onFinishAll();
+                        break;
+
+                    case OnMediaPlayerServiceChangeListener.UPDATE_STATE_REPEAT:
+                        item.onChangeStateRepeat(stateRepeat);
+                        break;
+
+                }
+            }
+        }
+    }
+
+    private void sendMessageFromService(String mess) {
+        Log.i(TAG, "sendMessageFromService: " + mess);
+        mess_fromservice = mess;
+        runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_MESSAGE);
+    }
+
+    // ------------------------------------------------------------------------------------------------//
+
+    public void initMedia() {
+        config = new SharedPref(this);
+        if (mMediaPlayer == null) {
+            mMediaPlayer = new MediaPlayer();
+            mMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+            mMediaPlayer.setOnBufferingUpdateListener(this);
+        }
+
+        mMediaPlayer.setOnPreparedListener(this);
+        mMediaPlayer.setOnErrorListener(this);
+        mMediaPlayer.setOnCompletionListener(this);
+        mMediaPlayer.setOnInfoListener(this);
+//        handel = new Handler();
+        singerMap = App.getInstance().getDataUser();
+    }
+
+    @Override
+    public void onCreate() {
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        Log.i(TAG, "onCreate: " + playinglist);
+        registerReceiver(broadcastReceiver, new IntentFilter(Constants.RECEIVER_MANAGER.ACTION_BROADCAST));
+        registerReceiver(phonCallRecevied, new IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED));
+        mLogHelper = new LogMediaHelper(this, LogMediaHelper.LOG_AUDIO);
+        initMedia();
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_HEADSET_PLUG);
+        filter.setPriority(1000);
+        // registerReceiver(screenReceiver, filter);
+        // coundownUpdateTimer.start();
+    }
+
+    public void registryMediaButtonController() {
+        try {
+            audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            remoteReceiverComp = new ComponentName(this, MediaButtonControlReceiver.class);
+            audioManager.registerMediaButtonEventReceiver(remoteReceiverComp);
+        } catch (SecurityException e) {
+            e.printStackTrace();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    ComponentName remoteReceiverComp;
+
+    public void checkSetIsHuman() {
+        isHuman = isPlaying();
+    }
+
+    private BroadcastReceiver broadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context arg0, Intent arg1) {
+
+            int action = arg1.getIntExtra(Constants.RECEIVER_MANAGER.ACTION_NAME, 0);
+            if (action == Constants.RECEIVER_MANAGER.VALUE_MEDIA_PLAYER_CONTROLLER) {
+                switch (arg1.getIntExtra(Constants.RECEIVER_MANAGER.ACTION_MESSAGE, 0)) {
+                    case Constants.RECEIVER_MANAGER.MESS_MEDIA_PLAYER_CONTROLLER_NEXT:
+                        Log.i(TAG, "MESS_MEDIA_PLAYER_CONTROLLER_NEXT");
+                        playNextMusic();
+                        break;
+                    case Constants.RECEIVER_MANAGER.MESS_MEDIA_PLAYER_CONTROLLER_PREV:
+                        playForwardMusic();
+                        Log.i(TAG, "MESS_MEDIA_PLAYER_CONTROLLER_PREV");
+                        break;
+                    case Constants.RECEIVER_MANAGER.MESS_MEDIA_PLAYER_CONTROLLER_TOGLE:
+                        Log.i(TAG, "MESS_MEDIA_PLAYER_CONTROLLER_TOGLE");
+                        if (mCountdownToogle == null) {
+                            mCountdownToogle = new SupperCountDown(MediaButtonControlReceiver.DOUBLE_CLICK_DELAY, MediaButtonControlReceiver.DOUBLE_CLICK_DELAY);
+                        }
+                        mCountdownToogle.cancel();
+                        mCountdownToogle.setTimes(++times);
+                        mCountdownToogle.start();
+                        break;
+                }
+            }
+        }
+    };
+
+    private int times = 0;
+    private SupperCountDown mCountdownToogle;
+
+    private class SupperCountDown extends CountDownTimer {
+        private int mTimes = 0;
+
+        public SupperCountDown(long millisInFuture, long countDownInterval) {
+            super(millisInFuture, countDownInterval);
+        }
+
+        public void setTimes(int mtimes) {
+            this.mTimes = mtimes;
+        }
+
+        @Override
+        public void onFinish() {
+            if (mTimes == 1) {
+                Log.i(TAG, "onFinish 1: toogleMusic");
+                toogleMusic(false);
+            } else if (mTimes == 2) {
+                Log.i(TAG, "onFinish 2: playNextMusic");
+                playNextMusic();
+            } else if (mTimes == 3) {
+                Log.i(TAG, "onFinish 3: playForwardMusic");
+                playForwardMusic();
+                // Was interact
+            }
+            times = 0;
+        }
+
+        @Override
+        public void onTick(long millisUntilFinished) {
+
+        }
+
+    }
+
+    /**
+     * Set data tu download vao cho Album
+     */
+    public void setDatOffline() {
+        songIndexable = SongIndexableDataSource.getInstance().getListItemToMap();
+        ArrayList<AllModel> listSong = FileDBService.readFileInfo(Constants.TYPE_BAI_HAT, "");
+        if (listSong == null) {
+            listSong = new ArrayList<AllModel>();
+        }
+        Cursor cursor = null;
+        for (int i = 0; i < listSong.size(); i++) {// xoa bai nao ko co
+            // _local_media_url
+            String str = listSong.get(i).local_url;
+            if (str == null || str.equals("") || !Utilities.isFileExistsInSD(str)) {
+                listSong.remove(i);
+                i--;
+            } else {
+                exitsInMyList.put(str, true);
+            }
+        }
+        String selection = MediaStore.Audio.Media.IS_MUSIC + " == 1 ";
+        try {
+            cursor = getContentResolver().query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, Variables.projectionSong, selection, null, MediaStore.Audio.Media.DATE_ADDED);
+        } catch (SecurityException e) {
+            Log.e(TAG, e);
+        } catch (Exception e) {
+            Log.e(TAG, e);
+        }
+        listSong.addAll(Variables.getSongCursor(cursor, exitsInMyList));
+        Collections.sort(listSong, sortSongIndex);
+
+        if (listSong.size() > 0) {
+            AllModel item = new AllModel();
+            item.name = listSong.get(0).name;
+            item.listened = listSong.get(0).listened;
+            item.singer = listSong.get(0).singer;
+            item.song_list = listSong;
+            item.type = Constants.TYPE_SONG_OFFLINE;
+            typePlayActivity = Constants.TYPE_SONG_OFFLINE;
+            this.playinglist.song_list = item.song_list;
+        }
+    }
+
+    private Map<String, Long> songIndexable = new HashMap<>();
+    private Map<String, Boolean> exitsInMyList = new HashMap<String, Boolean>();
+    private Comparator<AllModel> sortSongIndex = new Comparator<AllModel>() {
+        @Override
+        public int compare(AllModel lhs, AllModel rhs) {
+            Long long1 = songIndexable.get(lhs.local_url);
+            Long long2 = songIndexable.get(rhs.local_url);
+            long x = 0;
+            long y = 0;
+            if (long1 != null)
+                x = long1;
+            if (long2 != null)
+                y = long2;
+            return (int) (y - x);
+        }
+    };
+
+    public void processWidget(Intent intent) {
+        int action = intent.getIntExtra(Constants.RECEIVER_MANAGER.ACTION_NAME, 0);
+        Log.i(TAG, "processWidget action: " + action);
+        if (playinglist == null || playinglist.song_list == null || playinglist.song_list.size() == 0) {
+            getAlbumFromCache();
+            if (playinglist != null && playinglist.song_list != null && playinglist.song_list.size() > currentSongIndex) {
+                playSong(currentSongIndex, false);
+            }
+            return;
+        }
+
+        switch (action) {
+            case Constants.RECEIVER_MANAGER.VALUE_CHANGEPLAY:
+                if (statePlaying == PLAYING_PLAYING) {
+                    pauseAutoMusic();
+                } else {
+                    // chua nap datasource
+                    if (statePlaying == PLAYING_RETRIEVING || statePlaying == PLAYING_PREPARING) {
+                        playSong(currentSongIndex, false);
+                    } else {
+                        startMusic();
+                    }
+                }
+                updateNotification();
+                break;
+
+            case Constants.RECEIVER_MANAGER.VALUE_CHANGEPLAY_NEXT:
+                playNextMusic();
+                updateNotification();
+                break;
+            case Constants.RECEIVER_MANAGER.VALUE_CHANGEPLAY_STOP:
+                updateWidget();
+                sendBroadCastTurnOffApp();
+                // updateNotification();
+                break;
+            case Constants.RECEIVER_MANAGER.VALUE_CHANGEPLAY_BACK:
+                playForwardMusic();
+                updateNotification();
+                break;
+            case Constants.RECEIVER_MANAGER.VALUE_CHANGE_STATE_REPEAT:
+                Log.i(TAG, "processWidget VALUE_CHANGE_STATE_REPEAT");
+                stateRepeat++;
+                if (stateRepeat > REPEAT_SUFF) {
+                    stateRepeat = REPEAT_All;
+                }
+                runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_REPEAT);
+                break;
+        }
+
+    }
+
+    public ArrayList<AllModel> getSongs() {
+        return playinglist.song_list;
+    }
+
+    public PlayingList getPlayinglist() {
+        return playinglist;
+    }
+
+    /**
+     * Play a list song.<br>
+     */
+    public void setPlayingList(PlayingList plist) {
+        boolean samePlayinglist = isSamePlayinglist(plist);
+        if (samePlayinglist) {
+            if (checkIndexSampleList(plist)) {
+                setPlayingList(plist, 0);
+                return;
+            } else if (getSongs().size() > 0) {
+                Log.i(TAG, "setPlayingList giong plist phia truoc ? va size #0");
+            }
+        }
+
+        int type = plist.type_playing;
+        switch (type) {
+            case PlayingList.TYPE_FULL_DATA:
+                playinglist.id = plist.id;
+                //playinglist.setPlayList(plist.isPlaylist());
+                playinglist.song_list.clear();
+                playinglist.song_list.addAll(plist.song_list);
+                playSong(0, true);
+                break;
+            default:
+                stopMusic();
+                getPlayinglistDetail(plist);
+                break;
+
+        }
+        errorCount = 0;
+        ImageView imgTemp = new ImageView(this);
+        App.getInstance().getImageBusiness().setAlbum(playinglist.image, imgTemp);
+        saveAlbum();
+    }
+
+    /**
+     * Play a list song exists and difference index.
+     *
+     * @param plist
+     * @param startIndex
+     */
+    public void setPlayingList(PlayingList plist, int startIndex) {
+        boolean samePlayinglist = isSamePlayinglist(plist);
+        if (samePlayinglist && startIndex == getCurrentSongIndex()) {
+            playSong(startIndex, false);
+            return;
+        }
+        int type = plist.type_playing;
+        switch (type) {
+            case PlayingList.TYPE_FULL_DATA:
+                this.playinglist = plist;
+                playSong(startIndex, true);
+                break;
+            case PlayingList.TYPE_SONG:
+                if (plist.song_list.size() == 0) {
+                    getPlayinglistDetail(plist);
+                } else {
+                    this.playinglist = plist;
+                    playSong(startIndex, true);
+                }
+            case PlayingList.TYPE_SONG_BXH_AM:
+            case PlayingList.TYPE_SONG_BXH_CA:
+            case PlayingList.TYPE_SONG_BXH_VN:
+                if (plist.song_list.size() == 0) {
+                    getPlayinglistDetail(plist);
+                } else {
+                    this.playinglist = plist;
+                    playSong(startIndex, false);
+                    Tracker.sendEvent(getString(R.string.ga_category_media), getString(R.string.ga_action_top_play_rank), playinglist.name);
+                }
+                break;
+            case PlayingList.TYPE_ALBUM:
+                if (plist.song_list.size() == 0) {
+                    getPlayinglistDetail(plist);
+                } else {
+                    this.playinglist = plist;
+                    playSong(startIndex, false);
+                    Tracker.sendEvent(getString(R.string.ga_category_media), getString(R.string.ga_action_top_play_album), playinglist.name);
+                }
+                break;
+            case PlayingList.TYPE_PLAYLIST:
+                if (plist.song_list.size() == 0) {
+                    getPlayinglistDetail(plist);
+                } else {
+                    this.playinglist = plist;
+                    playSong(startIndex, false);
+                    Tracker.sendEvent(getString(R.string.ga_category_media), getString(R.string.ga_action_top_play_playlist), playinglist.name);
+                }
+                break;
+
+        }
+        errorCount = 0;
+        saveAlbum();
+    }
+
+    /**
+     * Add song to playing list.<br>
+     */
+    public void addSongToPlayingList(AllModel song) {
+        if (song == null)
+            return;
+
+        boolean isHad = false;
+        if (getSongs().size() == 0) {
+            playinglist = new PlayingList(PlayingList.TYPE_SONG, song.id, song.name, song.getSinger(), song.image, song.identify);
+        } else {
+            for (int i = 0; i < getSongs().size(); i++) {
+                if (song.id == getSongs().get(i).id) { // Bai hat co trong
+                    // playlist chua.
+                    isHad = true;
+                    break;
+                }
+            }
+        }
+
+        if (!isHad) {
+            playinglist.song_list.add(song);
+            runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_CHANGE_DATA_OF_PLIST);
+            sendMessageFromService(getString(R.string.v15_player_add_done));
+            if (playinglist.song_list.size() == 1) {
+                playSong(0, false);
+            }
+        }
+    }
+
+    /**
+     * Save album.<br>
+     */
+    public void saveAlbum() {
+        SharedPref localSharedPref = new SharedPref(this, Constants.ALBUM_CURENT_CACHE);
+        localSharedPref.putInt(Constants.CURRENT_SONG, this.currentSongIndex);
+        if (this.playinglist.song_list.size() > 50) {
+            localSharedPref.putBoolean(Constants.TYPE_PLAY_WIDGET, true);
+        } else {
+            localSharedPref.putString(Constants.ALBUM_CURENT_CACHE, new Gson().toJson(this.playinglist, PlayingList.class));
+            localSharedPref.putBoolean(Constants.TYPE_PLAY_WIDGET, false);
+        }
+    }
+
+    /**
+     * Get album from cache.<br>
+     */
+    public void getAlbumFromCache() {
+        SharedPref localSharedPref = new SharedPref(this, Constants.ALBUM_CURENT_CACHE);
+        boolean isOffline = localSharedPref.getBoolean(Constants.TYPE_PLAY_WIDGET, false);
+        this.typePlayActivity = localSharedPref.getInt(Constants.TYPE_PLAYACTIVITY, Constants.TYPE_PLAY_ALL);
+        this.currentSongIndex = localSharedPref.getInt(Constants.CURRENT_SONG, 0);
+        Log.i(TAG, "getAlbumFromCache: " + isOffline);
+        if (isOffline) {
+            setDatOffline();
+        } else {
+            if (!NetworkHelper.isNetworkAvailable(getApplicationContext())) {
+                setDatOffline();
+            } else {
+                PlayingList am = getAlbumFromJson(localSharedPref);
+                if (am == null) {
+                    setDatOffline();
+                } else {
+                    this.playinglist.song_list = am.song_list;
+                }
+
+            }
+        }
+
+    }
+
+    /**
+     * Read album from cache.<br>
+     *
+     * @param localSharedPref
+     * @return
+     */
+    public PlayingList getAlbumFromJson(SharedPref localSharedPref) {
+        PlayingList am = null;
+        String str = localSharedPref.getString(Constants.ALBUM_CURENT_CACHE, "");
+        Log.i(TAG, "getAlbumFromJson: " + str);
+        if (!TextUtils.isEmpty(str)) {
+            try {
+                am = new Gson().fromJson(str, PlayingList.class);
+            } catch (Exception e) {
+                Log.e(TAG, e);
+            }
+        }
+        return am;
+    }
+
+    public void savePlaySongcurrent() {
+        SharedPref localSharedPref = new SharedPref(this, Constants.ALBUM_CURENT_CACHE);
+        localSharedPref.putInt(Constants.CURRENT_SONG, this.currentSongIndex);
+        localSharedPref.putInt(Constants.TYPE_PLAYACTIVITY, this.typePlayActivity);
+    }
+
+    public int getCurrentSongIndex() {
+        return currentSongIndex;
+    }
+
+    public void setCurrentSongIndex(int currentSongIndex) {
+        this.currentSongIndex = currentSongIndex;
+    }
+
+    /**
+     * Tra ve model dang o player. Tinh ca truong hop model da bi remove nhung
+     * van chua next bai khac
+     *
+     * @return
+     */
+    public AllModel getSongCurrent() {
+        if (getSongs() == null || getSongs().size() == 0 || currentSongIndex >= getSongs().size()) {
+            return null;
+        }
+        currentSongIndex = currentSongIndex == -1 ? 0 : currentSongIndex;
+        return getSongs().get(currentSongIndex);
+    }
+
+    public void pauseMusic() {
+        if (playinglist == null)
+            return;
+        if (isPlaying()) {
+            mMediaPlayer.pause();
+            statePlaying = PLAYING_PAUSED;
+        }
+        runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_PAUSED);
+        stopForeground(true);
+        updateWidget();
+    }
+
+    public void refreshUiPlayer() {
+        if (isPlaying()) {
+            runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_PLAYING);
+        } else {
+            runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_PAUSED);
+        }
+    }
+
+    /**
+     * Su dung khi tu dong pause nhac Ko stopforce service
+     */
+    public void pauseAutoMusic() {
+        if (playinglist == null)
+            return;
+
+        if (isPlaying()) {
+            mMediaPlayer.pause();
+            statePlaying = PLAYING_PAUSED;
+        }
+        runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_PAUSED);
+        updateWidget();
+        updateNotification();
+    }
+
+    /**
+     * Su dung khi tu dong stop de ko buffer
+     */
+    public void stopAutoMusic() {
+        if (playinglist == null)
+            return;
+        if (isPlaying()) {
+            if (mMediaPlayer != null) {
+                mMediaPlayer.stop();
+                mMediaPlayer.reset();
+                statePlaying = PLAYING_PAUSED;
+            }
+        }
+
+        runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_NONE);
+        updateWidget();
+    }
+
+    public void stopMusic() {
+        mLogHelper.reset();
+        if (playinglist == null)
+            return;
+        if (mMediaPlayer != null) {
+            mMediaPlayer.stop();
+            mMediaPlayer.reset();
+            statePlaying = PLAYING_NONE;
+        }
+        runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_NONE);
+        stopForeground(true);
+    }
+
+    public void startMusic() {
+        stopVideo();
+        if (playinglist == null)
+            return;
+        audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        if (statePlaying != PLAYING_PREPARING && statePlaying != PLAYING_RETRIEVING) {
+            if (mMediaPlayer != null) {
+                mMediaPlayer.start();
+                statePlaying = PLAYING_PLAYING;
+                runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_PLAYING);
+            } else {
+                initMedia();
+            }
+        }
+        updateWidget();
+        updateNotification();
+    }
+
+    /**
+     * Play a song with index song.<br>
+     */
+    public void playSong(int songIndex, boolean isFeed) {
+        try {
+            if (playinglist.song_list == null || playinglist.song_list.size() <= 0) {
+                return;
+            }
+            if (playinglist.song_list.size() < songIndex) {
+                songIndex = 0;
+            }
+            if (errorCount > playinglist.song_list.size()) {
+                Log.i(TAG, "playSong errorCount: " + errorCount);
+                pauseMusic();
+                errorCount = 0;
+                return;
+            }
+            currentDuration = 0;
+            needRetry = false;
+            mMediaPlayer.reset();
+            currentSongIndex = songIndex;
+//            boolean isFast = NetworkHelper.isConnectedFast(this);
+            AllModel cSong = playinglist.song_list.get(currentSongIndex);
+            String media_url = cSong.media_url; // mac dinh la 128
+            boolean is128 = config.getBoolean(SettingActivity.ID_IS_128_LISTEN, true);
+            currentBuffer = 0;
+            // kiem tra xem co the play offline
+            String canPlayOffline = Utilities.isCanPlayOffline(playinglist.song_list.get(currentSongIndex));
+            if (!TextUtils.isEmpty(canPlayOffline)) {
+                media_url = canPlayOffline;
+                currentBuffer = 100;
+            } else {
+                // Neu khong la VIP va bai hat chi cho nghe preview -> play
+                // preview
+                if (!LoginObject.isSuperVIP(this) && playinglist.song_list.get(currentSongIndex).listen_type == AllModel.LISTEN_TYPE_PREVIEW) {
+                    media_url = playinglist.song_list.get(currentSongIndex).media_url_pre;
+                    sendMessageFromService(getString(R.string.listen_pre));
+                } else {
+                    if (is128)
+                        media_url = cSong.media_url;
+                    else
+                        media_url = cSong.download_url;
+                }
+            }
+
+            updateWidget();
+            updateNotification();
+
+            currentMediaUrl = media_url;
+            mMediaPlayer.setDataSource(currentMediaUrl);
+            mLogHelper.logSetDataSource(cSong.getID(), currentMediaUrl);
+            mMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+            statePlaying = PLAYING_PREPARING;
+            runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_REPEAT);
+            runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_PREPARING);
+            mMediaPlayer.prepareAsync();
+            updateWidget();
+            updateNotification();
+            Tracker.sendEvent(getString(R.string.ga_category_media), getString(R.string.ga_action_top_listen), cSong.name);
+            Tracker.sendView(getString(R.string.ga_screen, "PLAYER_VIEW: " + cSong.name));
+            logListen(cSong.getID(), cSong.type, isFeed);
+        } catch (Exception e) {
+            Log.e(TAG, e);
+            playNextWhenError(songIndex + 1);
+        }
+    }
+
+    private void playNextWhenError(int index) {
+        errorCount++;
+        if (playinglist.song_list != null && index >= playinglist.song_list.size()) {
+            index = 0;
+        }
+        if (errorCount == 30) {
+            pauseMusic();
+        }
+        if (!isPaused()) {
+            Log.i(TAG, "playNextWhenError retry error");
+            playSong(index, false);
+        }
+    }
+
+    public void updateNotification() {
+        if (playinglist == null || playinglist.song_list == null || playinglist.song_list.size() <= currentSongIndex) {
+            return;
+        }
+        if (playinglist.song_list.get(currentSongIndex) != null) {
+            Notification notif = createNotification(playinglist.song_list.get(currentSongIndex));
+            startForeground(1, notif);
+            savePlaySongcurrent();
+        }
+    }
+
+    public Notification createNotification(final AllModel song) {
+        final RemoteViews views = new RemoteViews(getPackageName(), R.layout.player_notification);
+        String title = song.name;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
+
+            ComponentName service = new ComponentName(this, PlayMusicService.class);
+
+            Intent next = new Intent(this, PlayMusicService.class);
+            next.setAction(Constants.RECEIVER_MANAGER.ACTION_BROADCAST);
+            next.putExtra(Constants.RECEIVER_MANAGER.ACTION_NAME, Constants.RECEIVER_MANAGER.VALUE_CHANGEPLAY_NEXT);
+            next.putExtra(Constants.RECEIVER_MANAGER.ACTION_START_WIDGET, Constants.RECEIVER_MANAGER.VALUE_WIDGET);
+            next.setComponent(service);
+            views.setOnClickPendingIntent(R.id.next, PendingIntent.getService(this, 1, next, 0));
+
+            Intent playPause = new Intent(this, PlayMusicService.class);
+            playPause.setAction(Constants.RECEIVER_MANAGER.ACTION_BROADCAST);
+            playPause.putExtra(Constants.RECEIVER_MANAGER.ACTION_NAME, Constants.RECEIVER_MANAGER.VALUE_CHANGEPLAY);
+            playPause.putExtra(Constants.RECEIVER_MANAGER.ACTION_START_WIDGET, Constants.RECEIVER_MANAGER.VALUE_WIDGET);
+            int playButton = isPlaying() ? R.drawable.icon_pause_lockscreen : R.drawable.icon_play_lockscreen;
+            // Log.i("PlayMusicService.createNotification()", "notify play
+            // "+playButton+"/"+isPlaying());
+            views.setImageViewResource(R.id.play_pause, playButton);
+            playPause.setComponent(service);
+            views.setOnClickPendingIntent(R.id.play_pause, PendingIntent.getService(this, 2, playPause, 0));
+
+            Intent close = new Intent(this, PlayMusicService.class);
+            close.setAction(Constants.RECEIVER_MANAGER.ACTION_BROADCAST);
+            close.putExtra(Constants.RECEIVER_MANAGER.ACTION_NAME, Constants.RECEIVER_MANAGER.VALUE_CHANGEPLAY_STOP);
+            close.putExtra(Constants.RECEIVER_MANAGER.ACTION_START_WIDGET, Constants.RECEIVER_MANAGER.VALUE_WIDGET);
+            close.setComponent(service);
+            views.setOnClickPendingIntent(R.id.close, PendingIntent.getService(this, 3, close, 0));
+        }
+
+        views.setTextViewText(R.id.title, title);
+        views.setTextViewText(R.id.artist, song.getSinger());
+
+//        SimpleTarget target = new SimpleTarget<Bitmap>(Constants.SIZE_IMAGE_NOTIFY, Constants.SIZE_IMAGE_NOTIFY) {
+//            @Override
+//            public void onResourceReady(Bitmap bitmap, GlideAnimation glideAnimation) {
+//                if (views != null)
+//                    views.setImageViewBitmap(R.id.image, bitmap);
+//            }
+//        };
+//        App.getInstance().getImageBusiness().setImageNotify(song.getImage(), R.mipmap.ic_launcher, R.mipmap.ic_launcher, target);
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.HONEYCOMB) {
+            views.setTextColor(R.id.title, 0xffffffff);
+            views.setTextColor(R.id.artist, 0xffffffff);
+        }
+
+        Notification notification = new Notification();
+        notification.contentView = views;
+        notification.icon = R.drawable.logo_notice;
+        notification.flags |= Notification.FLAG_ONGOING_EVENT;
+        notification.tickerText = title;
+
+        NotificationTarget notificationTarget = new NotificationTarget(this, views, R.id.image, notification, 1);
+        App.getInstance().getImageBusiness().setNotification(song.getImage(), R.mipmap.ic_launcher, R.mipmap.ic_launcher, notificationTarget);
+
+        Intent i = new Intent(this, PlayerActivity.class);
+        i.setFlags(Intent.FLAG_RECEIVER_REPLACE_PENDING);
+        PendingIntent detailsIntent = PendingIntent.getActivity(this, Constants.NOTIFICATION.ID_MUSIC_BAR, i, 0);
+        notification.contentIntent = detailsIntent;
+        return notification;
+    }
+
+    public MediaPlayer getMediaPlayer() {
+        return mMediaPlayer;
+    }
+
+    @Override
+    public void onRebind(Intent intent) {
+        super.onRebind(intent);
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        return super.onUnbind(intent);
+    }
+
+    public void toogleMusic(boolean isClick) {
+        if (getStatePlaying() == PlayMusicServiceBase.PLAYING_PLAYING) {
+            pauseMusic();
+            if (isClick)
+                Tracker.sendEvent(getString(R.string.ga_category_player_control), getString(R.string.ga_action_song_player), getString(R.string.ga_label_press_pause));
+        } else {
+            startMusic();
+            if (isClick)
+                Tracker.sendEvent(getString(R.string.ga_category_player_control), getString(R.string.ga_action_song_player), getString(R.string.ga_label_press_play));
+        }
+    }
+
+    public void playNextMusic() {
+        if (playinglist == null || playinglist.song_list == null || playinglist.song_list.size() == 0)
+            return;
+        // neu che do choi la random
+        if (stateRepeat == REPEAT_SUFF) {
+            currentSongIndex = getRandom(currentSongIndex);
+            playSong(currentSongIndex, false);
+            return;
+        }
+        if (currentSongIndex == playinglist.song_list.size() - 1) {
+            currentSongIndex = 0;
+            playSong(currentSongIndex, false);
+        } else {
+            playSong(currentSongIndex + 1, false);
+        }
+    }
+
+    public void playForwardMusic() {
+        if (playinglist == null || playinglist.song_list == null || playinglist.song_list.size() == 0)
+            return;
+        // neu che do choi la random
+        if (stateRepeat == REPEAT_SUFF) {
+            currentSongIndex = getRandom(currentSongIndex);
+            playSong(currentSongIndex, false);
+            return;
+        }
+        if (currentSongIndex == 0) {
+            currentSongIndex = playinglist.song_list.size() - 1;
+            playSong(currentSongIndex, false);
+        } else {
+            playSong(currentSongIndex - 1, false);
+        }
+    }
+
+    private static final int REPEAT_COUNT = 1;
+
+    @Override
+    public boolean onError(MediaPlayer mp, int what, int extra) {
+        mLogHelper.logOnError(what, extra);
+        needRetry = true;
+        errorCount++;
+        if (needRetryCount > REPEAT_COUNT) {
+            needRetry = false;
+            needRetryCount = 0;
+        }
+        return false;
+    }
+
+    boolean needRetry = false;
+    int needRetryCount = 0;
+
+    /**
+     * Xu ly khi play xong 1 bai hat hoac gap loi lien quan den media: decode
+     * loi,
+     */
+    @Override
+    public void onCompletion(MediaPlayer mp) {
+        mLogHelper.logOnCompletion();
+        // TH: ds bai hat null hoac dang pause
+        if (playinglist == null || playinglist.song_list == null || playinglist.song_list.size() == 0 || isPaused()) {
+            return;
+        }
+        if (needRetry) {
+            new Handler().postDelayed(new Runnable() {
+                public void run() {
+                    playSong(currentSongIndex, false);
+                    needRetryCount++;
+                }
+            }, DateTimeHelper.SECOND);
+            return;
+        }
+        switch (stateRepeat) {
+            case REPEAT_All:
+                if (currentSongIndex < (playinglist.song_list.size() - 1)) {
+                    playSong(currentSongIndex + 1, false);
+                } else {
+                    playSong(0, false);
+                }
+                break;
+            case REPEAT_ONE:
+                if (currentBuffer > 0 && currentBuffer < 99) {
+                    stopAutoMusic();
+                    currentBuffer = 0;
+                } else {
+                    startMusic();
+                }
+                break;
+            case REPEAT_SUFF:
+                currentSongIndex = getRandom(currentSongIndex);
+                playSong(currentSongIndex, false);
+                break;
+        }
+    }
+
+    private int getRandom(final int last) {
+        if (playinglist.song_list != null && playinglist.song_list.size() == 1)
+            return 0;
+        Random rand = new Random();
+        int mNew = rand.nextInt((playinglist.song_list.size() - 1) - 0 + 1) + 0;
+        if (mNew != last) {
+            return mNew;
+        } else {
+            return getRandom(last);
+        }
+    }
+
+    @Override
+    public void onPrepared(MediaPlayer mp) {
+        mLogHelper.logOnPrepared();
+        currentDuration = mp.getDuration();
+        coundownUpdateTimer.cancel();
+        coundownUpdateTimer.start();
+        statePlaying = PLAYING_PREPARED;
+        runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_PLAYING);
+        if (!isPaused() && state_phone == TelephonyManager.CALL_STATE_IDLE) {
+            mp.start();
+            startMusic();
+        }
+    }
+
+    // ------------------SETUP TIMER AND FINISH
+    // APP-------------------------------------------------
+    private CountDownTimer countdownSetting;
+
+    public void sendBroadCastTurnOffApp() {
+        try {
+            Log.d(TAG, "sendBroadCastTurnOffApp");
+            pauseMusic();
+            runUpdateChangeService(OnMediaPlayerServiceChangeListener.FINISH_ALL);
+            Intent i = new Intent();
+            i.setAction(Constants.RECEIVER_MANAGER.ACTION_BROADCAST);
+            i.putExtra(Constants.RECEIVER_MANAGER.ACTION_NAME, Constants.RECEIVER_MANAGER.VALUE_FINISH);
+            sendBroadcast(i);
+            stopForeground(true);
+            stopSelf();
+        } catch (Exception e) {
+            Log.e(TAG, e);
+        }
+        isHuman = false;
+    }
+
+    // ------------Set cancel
+    public void setTimeOffFromSettingCancel(boolean isCancel) {
+        if (isCancel) {
+            if (countdownSetting != null) {
+                countdownSetting.cancel();
+            }
+        }
+    }
+
+    // ------------------set turn off from setting
+    public void setTimeOffFromSetting(long timeDelay) {
+        if (countdownSetting != null) {
+            countdownSetting.cancel();
+        }
+
+        countdownSetting = new CountDownTimer(timeDelay, timeDelay) {
+            @Override
+            public void onTick(long millisUntilFinished) {
+
+            }
+
+            @Override
+            public void onFinish() {
+                sendBroadCastTurnOffApp();
+                config.putBoolean("offtime", false);
+            }
+        }.start();
+    }
+
+    @Override
+    public void onBufferingUpdate(MediaPlayer mp, int percent) {
+        mLogHelper.logOnBufferingUpdate(percent);
+        currentBuffer = percent;
+        runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_BUFFFER);
+    }
+
+    private int currentBuffer = 0;
+    private int currentProgress = 0;
+    private CountDownTimer coundownUpdateTimer = new CountDownTimer(300000, 1000) {
+        @Override
+        public void onTick(long millisUntilFinished) {
+            try {
+                if (mMediaPlayer == null || statePlaying != PLAYING_PLAYING) {
+                    return;
+                }
+//                long currentDuration = mMediaPlayer.getDuration();
+                long currentPosition = mMediaPlayer.getCurrentPosition();
+
+                if (currentDuration >= 0 && currentPosition >= 0) {
+                    int progress = DateTimeHelper.getProgressPercentage(currentPosition, currentDuration);
+                    currentProgress = progress;
+                    runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_PROGRESS);
+
+                }
+            } catch (Exception e) {
+                Log.e(TAG, e);
+            }
+        }
+
+        @Override
+        public void onFinish() {
+            start();
+        }
+    };
+
+    @Override
+    public void onAudioFocusChange(int focusChange) {
+        switch (focusChange) {
+            case AudioManager.AUDIOFOCUS_GAIN:
+                // resume playback
+                Log.d(TAG, "onAudioFocusChange AUDIOFOCUS_GAIN");
+                if (mMediaPlayer != null && isHuman) {
+                    try {
+                        isHuman = false;
+                        startMusic();
+                        mMediaPlayer.setVolume(1.0f, 1.0f);
+                    } catch (Exception e) {
+                        Log.e(TAG, e);
+                    }
+                } else if (mMediaPlayer == null) {
+                    initMedia();
+                }
+                break;
+
+            case AudioManager.AUDIOFOCUS_LOSS:
+                Log.d(TAG, "onAudioFocusChange AUDIOFOCUS_LOSS");
+                // Lost focus for an unbounded amount of time: stop playback and
+                // release media player
+                if (mMediaPlayer != null && isPlaying()) {
+                    if (!App.getInstance().isActivityVisible()) {
+                        pauseAutoMusic();
+                    }
+                }
+                break;
+
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+
+                // Lost focus for a short time, but we have to stop
+                // playback. We don't release the media player because playback
+                // is likely to esume
+                Log.d(TAG, "onAudioFocusChange AUDIOFOCUS_LOSS_TRANSIENT");
+                if (mMediaPlayer != null && isPlaying()) {
+                    checkSetIsHuman();
+                    pauseAutoMusic();
+                }
+                break;
+
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                Log.d(TAG, "onAudioFocusChange AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK");
+                // Lost focus for a short time, but it's ok to keep playing
+                // at an attenuated level
+                if (mMediaPlayer != null && isPlaying())
+                    break;
+        }
+    }
+
+    /**
+     * -----------------WIDGET----------------------
+     */
+
+    /**
+     * Update Widget SOng
+     */
+    public void updateWidget() {
+        RemoteViews remoteViews = new RemoteViews(this.getApplicationContext().getPackageName(), R.layout.widget_demo);
+        remoteViews.setTextViewText(R.id.textView1, getString(R.string.desc_widget_song));
+        remoteViews.setViewVisibility(R.id.textView2, View.VISIBLE);
+        if (playinglist != null && getSongs() != null && getSongs().size() > currentSongIndex) {
+            if (getSongs().get(currentSongIndex) != null) {
+                String name = getSongs().get(currentSongIndex).name;
+                String singer = getSongs().get(currentSongIndex).singer;
+                // Set the text
+                remoteViews.setTextViewText(R.id.textView1, name);
+                remoteViews.setTextViewText(R.id.textView2, singer);
+            }
+        }
+
+        if (statePlaying == PLAYING_PLAYING || statePlaying == PLAYING_PREPARED || statePlaying == PLAYING_PREPARING) {
+            remoteViews.setImageViewResource(R.id.btnplaymusic, R.drawable.new_icon_pause);
+        } else {
+            remoteViews.setImageViewResource(R.id.btnplaymusic, R.drawable.new_icon_play);
+        }
+
+        remoteViews.setOnClickPendingIntent(R.id.btnNextmusic, PlayerWidget.buildButtonPendingIntentNext(getApplicationContext()));
+
+        remoteViews.setOnClickPendingIntent(R.id.btnplaymusic, PlayerWidget.buildButtonPendingIntent(getApplicationContext()));
+        remoteViews.setOnClickPendingIntent(R.id.btnplaymusic, PlayerWidget.buildButtonPendingIntent(getApplicationContext()));
+        remoteViews.setOnClickPendingIntent(R.id.linerwidget, PlayerWidget.buildButtonPendingIntentOpenPlayer(getApplicationContext()));
+
+        remoteViews.setOnClickPendingIntent(R.id.linerwidget2, PlayerWidget.buildButtonPendingIntentOpenPlayer(getApplicationContext()));
+        ComponentName myWidget = new ComponentName(getApplicationContext(), PlayerWidget.class);
+        AppWidgetManager manager = AppWidgetManager.getInstance(getApplicationContext());
+        manager.updateAppWidget(myWidget, remoteViews);
+        if (playinglist != null && getSongs() != null && getSongs().size() > currentSongIndex) {
+            PlayerWidget4x2.resetWidgetUpdate(getApplicationContext(), getSongs().get(currentSongIndex), statePlaying, stateRepeat);
+            PlayerWidget4x4.resetWidgetUpdate(getApplicationContext(), getSongs().get(currentSongIndex), statePlaying, stateRepeat);
+        }
+    }
+
+    @Override
+    public boolean onInfo(MediaPlayer mp, int what, int extra) {
+        mLogHelper.logOnInfo(what, extra);
+        return true;
+    }
+
+    // =====Broascar ===//
+    BroadcastReceiver screenReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            int state = intent.getIntExtra("state", -1);
+            Log.i(TAG, "screenReceiver " + intent.getAction() + "/" + state);
+            if (intent.getAction().equals(Intent.ACTION_SCREEN_OFF)) {
+                Log.i(TAG, "screenReceiver Call LOCK SCREEN");
+                boolean lock_screen = config.getBoolean(Constants.LOCK_SCREEN, true);
+                lock_screen = false;
+                if (isPlaying() && lock_screen) {
+                    Intent i = new Intent(PlayMusicServiceBase.this, LockActivity.class);
+                    i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    PlayMusicServiceBase.this.startActivity(i);
+                }
+                try {
+                    KeyguardManager keyguardManager = (KeyguardManager) context.getSystemService(Activity.KEYGUARD_SERVICE);
+                    KeyguardLock lock = keyguardManager.newKeyguardLock(Context.KEYGUARD_SERVICE);
+                    lock.disableKeyguard();
+                } catch (Exception e) {
+                    Log.e(TAG, e);
+                }
+            }
+
+            if (intent.getAction().equals(Intent.ACTION_HEADSET_PLUG)) {
+                switch (state) {
+                    case 0:// thao tai nghe ra
+                        if (isPlaying()) {
+                            lastHeadsetPlug = 1;
+                        }
+                        pauseAutoMusic();
+                        break;
+                    case 1:// lap tai nghe vao
+                        if (lastHeadsetPlug == 1) {
+                            startMusic();
+                            lastHeadsetPlug = -1;
+                        }
+                        break;
+                }
+
+            }
+        }
+    };
+
+    private int lastHeadsetPlug = -1;
+
+    public void logListen(long id, int type, boolean isFeed) {
+        Log.i(TAG, "logActivity playmusicservicebase id= " + id + ", type= " + type);
+        if (id == 0)
+            return;
+        WSRestSocialUser rest = new WSRestSocialUser(getBaseContext());
+        type = type == Constants.TYPE_RANDOM ? 2 : type;
+        rest.logListen(type, id, isFeed);
+    }
+
+    /***
+     * Ham nay check xem bai dang choi va bai truyen vao khac vi tri ko
+     *
+     * @param plistnew
+     * @return : index bai hien tai
+     */
+    private boolean checkIndexSampleList(PlayingList plistnew) {
+        if (playinglist.song_list != null) {
+            for (int i = 0; i < playinglist.song_list.size(); i++) {
+                if (plistnew.id == playinglist.song_list.get(i).id) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isSamePlayinglist(PlayingList plistnew) {
+        if (plistnew != null && plistnew.id == playinglist.id && plistnew.type_playing == playinglist.type_playing) {
+            return true;
+        }
+        return false;
+    }
+
+    @SuppressWarnings("rawtypes")
+    private GsonRequest lastRequest;
+
+    private void getPlayinglistDetail(PlayingList plist) {
+        Log.i(TAG, "getPlayinglistDetail: " + plist);
+        if ("".equals(plist.name)) {
+            plist.name = playinglist.name;
+            plist.singer = playinglist.singer;
+        }
+        this.playinglist = plist;
+
+        if (lastRequest != null) {
+            lastRequest.cancel();
+        }
+        runUpdateChangeService(OnMediaPlayerServiceChangeListener.UPDATE_STATE_GET_DATA);
+        WSRestCommon rest = new WSRestCommon(PlayMusicServiceBase.this);
+        WSRestSocial restPlaylist = new WSRestSocial(PlayMusicServiceBase.this);
+        App.getInstance().cancelPendingRequests(AbsRestful.TAG_ALBUM);
+        App.getInstance().cancelPendingRequests(AbsRestful.TAG_SONG);
+        App.getInstance().cancelPendingRequests(AbsRestful.TAG_PLAYLIST_DETAIL);
+        App.getInstance().cancelPendingRequests(AbsRestful.TAG_GET_RANK_DETAIL);
+        switch (plist.type_playing) {
+            case Constants.TYPE_BAI_HAT:
+                if (plist.identify != null && !"".equals(plist.identify)) {
+                    lastRequest = rest.getSong(playinglist.identify, responseSongInfo, errorSongInfo);
+                } else {
+                    lastRequest = rest.getSong(playinglist.id, responseSongInfo, errorSongInfo);
+                }
+                break;
+            case PlayingList.TYPE_ALBUM:
+                if (plist.identify != null && !"".equals(plist.identify)) {
+                    lastRequest = rest.getAlbum(playinglist.identify, responseAlbumInfo, errorSongInfo);
+                } else {
+                    lastRequest = rest.getAlbum(playinglist.id, responseAlbumInfo, errorSongInfo);
+                }
+                break;
+            case PlayingList.TYPE_PLAYLIST:
+                restPlaylist.getDetailPlaylist(playinglist.user_id, playinglist.id, responsePlaylistInfo, errorSongInfo);
+                break;
+            case PlayingList.TYPE_SONG_BXH_AM:
+                loadBXH(PlayingList.TYPE_SONG_BXH_AM);
+                break;
+            case PlayingList.TYPE_SONG_BXH_CA:
+                loadBXH(PlayingList.TYPE_SONG_BXH_CA);
+                break;
+            case PlayingList.TYPE_SONG_BXH_VN:
+                loadBXH(PlayingList.TYPE_SONG_BXH_VN);
+                break;
+        }
+    }
+
+    private void loadBXH(int type) {
+        int itemType;
+        if (type == Constants.TYPE_SONG_BXH_AM) {
+            itemType = 3;
+        } else if (type == Constants.TYPE_SONG_BXH_VN) {
+            itemType = 1;
+        } else {
+            itemType = 2;
+        }
+        WSRestCommon rest = new WSRestCommon(PlayMusicServiceBase.this);
+        rest.getRanks(itemType, responseBXHInfo, errorSongInfo);
+    }
+
+    ListenerRest<RestRankModel> responseBXHInfo = new ListenerRest<RestRankModel>() {
+        public void onResponse(RestRankModel result) {
+            if (result.getData(getBaseContext()) != null) {
+                if (playinglist.song_list != null)
+                    playinglist.song_list.clear();
+                playinglist.song_list.addAll(result.getData().getSongs());
+                logListen(playinglist.id, playinglist.type_playing, true);
+                playSong(0, false);
+                saveAlbum();
+                Tracker.sendEvent(getString(R.string.ga_category_media), getString(R.string.ga_action_top_play_rank), playinglist.name);
+            } else {
+                stopMusic();
+                getSongs().clear();
+                sendMessageFromService(result.getError().getMessage());
+            }
+        }
+    };
+
+    ListenerRest<RestAllModel> responsePlaylistInfo = new ListenerRest<RestAllModel>() {
+        public void onResponse(RestAllModel result) {
+            if (result.getData(getBaseContext()) != null) {
+                if (playinglist.song_list != null)
+                    playinglist.song_list.clear();
+                playinglist.song_list.addAll(result.getData());
+                logListen(playinglist.id, playinglist.type_playing, true);
+                playSong(0, false);
+                saveAlbum();
+                Tracker.sendEvent(getString(R.string.ga_category_media), getString(R.string.ga_action_top_play_playlist), playinglist.name);
+            } else {
+                stopMusic();
+                getSongs().clear();
+                sendMessageFromService(result.getError().getMessage());
+            }
+        }
+
+        ;
+    };
+
+    ListenerRest<RestModel> responseSongInfo = new ListenerRest<RestModel>() {
+        public void onResponse(RestModel result) {
+            if (result.getData(getBaseContext()) != null) {
+                AllModel item = result.getData();
+                item.type = Constants.TYPE_BAI_HAT;
+                ArrayList<AllModel> tempList = new ArrayList<>();
+                tempList.addAll(item.song_list);
+                item.song_list.clear();
+                playinglist.song_list.add(item);
+                playinglist.song_list.addAll(tempList);
+                playinglist.name = item.name;
+                if (TextUtils.isEmpty(playinglist.singer))
+                    playinglist.singer = item.getSinger();
+                playSong(0, true);
+                saveAlbum();
+            } else {
+                stopMusic();
+                getSongs().clear();
+                sendMessageFromService(result.getError().getMessage());
+            }
+        }
+
+        ;
+    };
+
+    ListenerRest<RestModel> responseAlbumInfo = new ListenerRest<RestModel>() {
+        public void onResponse(RestModel result) {
+            if (result.getData(getBaseContext()) != null) {
+                AllModel item = result.getData();
+                playinglist.song_list = item.song_list;
+                playinglist.name = item.name;
+                playinglist.singer = item.getSinger();
+                logListen(playinglist.id, playinglist.type_playing, true);
+                playSong(0, false);
+                saveAlbum();
+                Tracker.sendEvent(getString(R.string.ga_category_media), getString(R.string.ga_action_top_play_album), playinglist.name);
+            } else {
+                stopMusic();
+                getSongs().clear();
+                sendMessageFromService(result.getError().getMessage());
+            }
+        }
+
+        ;
+    };
+
+    ErrorRestListener errorSongInfo = new ErrorRestListener() {
+        @Override
+        public void onErrorResponse(VolleyError arg0) {
+            sendMessageFromService(getString(R.string.load_fail));
+        }
+
+    };
+
+    // ========//
+    // LANG NGHE CUOC GOI
+    private BroadcastReceiver phonCallRecevied = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            telManager = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+            int state = telManager.getCallState();
+            switch (state) {
+                case TelephonyManager.CALL_STATE_RINGING:
+                    Log.d(TAG, "phonCallRecevied CALL_STATE RINNGER: " + state);
+                    state_phone = TelephonyManager.CALL_STATE_RINGING;
+                    if (mMediaPlayer != null && isPlaying()) {
+                        checkSetIsHuman();
+                        pauseAutoMusic();
+                    }
+                    break;
+                case TelephonyManager.CALL_STATE_OFFHOOK:
+                    Log.d(TAG, "phonCallRecevied CALL_STATE OFFHOOK: " + state);
+                    state_phone = TelephonyManager.CALL_STATE_OFFHOOK;
+                    if (mMediaPlayer != null && isPlaying()) {
+                        checkSetIsHuman();
+                        pauseAutoMusic();
+                    }
+                    break;
+                case TelephonyManager.CALL_STATE_IDLE:
+                    Log.d(TAG, "phonCallRecevied CALL_STATE IDE: " + state);
+                    state_phone = TelephonyManager.CALL_STATE_IDLE;
+                    if (isHuman) {
+                        isHuman = false;
+                        startMusic();
+                    }
+                    break;
+                default:
+                    Log.d(TAG, "phonCallRecevied default IDE: " + state);
+                    break;
+            }
+        }
+    };
+
+    /**
+     * am dang play -> true<br>
+     * else am is pause.<br>
+     */
+    public boolean checkSongIsPlay(AllModel item) {
+        boolean flag = false;
+        if (item != null) {
+            if (getSongCurrent() != null) {
+                if (item.id == getSongCurrent().id) {
+                    flag = true;
+                }
+            }
+        }
+        return flag;
+    }
+
+    private VideoView videoView;
+
+    public void setVideoView(VideoView videoView) {
+        this.videoView = videoView;
+    }
+
+    private void stopVideo() {
+        try {
+            if (videoView != null && videoView.isPlaying()) {
+                videoView.stopPlayback();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, e);
+        }
+    }
+
+    public int getCurrentDuration() {
+        return currentDuration;
+    }
+}

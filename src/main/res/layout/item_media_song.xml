@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/btn_media"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_select_item"
+    android:paddingBottom="@dimen/margin_normal"
+    android:paddingTop="@dimen/margin_normal">
+
+    <ImageView
+        android:id="@+id/image"
+        android:layout_width="60dp"
+        android:layout_height="60dp"
+        android:layout_marginLeft="@dimen/margin_normal"
+        android:background="@color/bg_image"
+        android:contentDescription="@string/app_name"
+        android:scaleType="fitXY"
+        />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:layout_marginLeft="@dimen/margin_normal"
+        android:layout_toRightOf="@+id/image"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="marquee"
+            android:fadingEdge="horizontal"
+            android:gravity="center_vertical"
+            android:marqueeRepeatLimit="marquee_forever"
+            android:maxLines="1"
+            android:paddingBottom="2sp"
+            android:text="@string/app_name"
+            android:textColor="@color/item_header"
+            android:textSize="@dimen/text_title"/>
+
+        <RelativeLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="start|left">
+
+            <TextView
+                android:id="@+id/singer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_centerVertical="true"
+                android:layout_toLeftOf="@+id/listened"
+                android:layout_toStartOf="@+id/listened"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:paddingRight="@dimen/margin_normal"
+                android:text="@string/app_name"
+                android:textColor="@color/item_content"
+                android:textSize="@dimen/text_content"/>
+
+            <TextView
+                android:id="@+id/listened"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_alignParentEnd="true"
+                android:layout_alignParentRight="true"
+                android:layout_centerVertical="true"
+                android:drawablePadding="5sp"
+                android:gravity="center_vertical"
+                android:paddingRight="@dimen/margin_normal"
+                android:text="@string/app_name"
+                android:textColor="@color/item_content"
+                android:textSize="@dimen/text_content"
+                android:visibility="gone"/>
+        </RelativeLayout>
+    </LinearLayout>
+
+
+</RelativeLayout>

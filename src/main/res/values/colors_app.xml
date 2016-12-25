@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="text_header">#000</color>
+    <color name="text_title">#1C1C1C</color>
+    <color name="text_content">#4F4F4F</color>
+    <color name="item_selected">#dddddd</color>
+    <color name="secondaryProgress">#b9b8b8</color>
+    <color name="bg_image">#9E9E9E</color>
+    <color name="bg_player_noti">#F8F8FF</color>
+    <color name="bg_controls">#80000000</color>
+</resources>

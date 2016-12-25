@@ -1,0 +1,55 @@
+{
+  "project_info": {
+    "project_number": "952056827512",
+    "firebase_url": "https://com-bigzun-video.firebaseio.com",
+    "project_id": "com-bigzun-video",
+    "storage_bucket": "com-bigzun-video.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:952056827512:android:ffc6713e079f8ccc",
+        "android_client_info": {
+          "package_name": "com.bigzun.video"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "952056827512-v7mbdkutbmjm22iljhdrga8m79ac3qff.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.bigzun.video",
+            "certificate_hash": "E7B5D5864DDF3B46A1664ED269BBC8B975467F15"
+          }
+        },
+        {
+          "client_id": "952056827512-5atefjs7kjlr5j1oma6dsfs4rd07nrcb.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAg1xMxbxr3gDeY_p4nWa2JffrLPz3ciq8"
+        }
+      ],
+      "services": {
+        "analytics_service": {
+          "status": 1
+        },
+        "appinvite_service": {
+          "status": 2,
+          "other_platform_oauth_client": [
+            {
+              "client_id": "952056827512-5atefjs7kjlr5j1oma6dsfs4rd07nrcb.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        },
+        "ads_service": {
+          "status": 2
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
